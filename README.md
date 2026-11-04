@@ -41,6 +41,17 @@ Per deck:
   - **Blinds**: scrolling stripes.
   - **Strobe**.
 
+- **Crop**:
+  - **Window** shows only the part of the video inside a box.
+  - **Tile** shrinks the whole video into the box, for small squares anywhere on screen.
+  - Width, height and X/Y position sliders. **Square** locks the height to the width.
+- **Wipe**:
+  - Shapes: Linear, Split (barn door), Box, Diamond, Circle, Triangle.
+  - **Angle** rotates any shape. The H, V, ↘ and ↗ buttons set horizontal, vertical and the two diagonals.
+  - **Amount** sets how much of the deck shows. **Invert** shows the outside of the shape instead.
+  - **Sweep** animates the wipe back and forth; **Spin** rotates the shape continuously.
+  - Stack different wipes and crops across the 4 decks to build geometric compositions.
+
 Master (over everything): **Bars** (random inverted and color-shifted strips), **Kick** (bars burst on each detected kick) and **Scanlines**.
 
 ### Sound-reactive effects
@@ -53,7 +64,7 @@ The meter shows bass, mid and high levels and flashes on each kick. **Sens** set
 
 Each deck's **Audio react** section (under Effects) chooses what it follows (bass, mid, high, level, or kicks) and how hard each effect responds:
 - **Pump**: opacity follows the sound.
-- **Zoom**, **Flash**, **Hue push**, **Shake**, **Tear** and **Invert**.
+- **Zoom**, **Flash**, **Hue push**, **Shake**, **Tear**, **Invert**, **Wipe** and **Crop size**.
 
 Shake and tear also fire immediately on every kick.
 

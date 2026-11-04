@@ -57,11 +57,21 @@ html, body {
   isolation: isolate;          /* the tint overlay blends with this deck only */
   mask-repeat: repeat;
   -webkit-mask-repeat: repeat;
+  mask-composite: intersect;
+  -webkit-mask-composite: source-in;
 }
 
 .tint { position: absolute; inset: 0; pointer-events: none; display: none; }
 
-/* "cover" sizing: the 16:9 player always fills the screen, cropping the overflow */
+/* Crop wrapper inside each layer. It's a size container, so in Tile mode the video
+   "covers" the crop box instead of the whole stage. */
+.frame {
+  position: absolute;
+  overflow: hidden;
+  container-type: size;
+}
+
+/* "cover" sizing: the 16:9 player always fills its box (stage or crop tile), cropping the overflow */
 .layer iframe {
   position: absolute;
   top: 50%;

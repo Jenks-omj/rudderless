@@ -10,7 +10,7 @@ import { h } from './dom.js';
 
 const rand = (a = 1) => (Math.random() * 2 - 1) * a;
 
-/** clip-path that cuts random horizontal bands out of a layer (revealing decks below). */
+/** Mask that cuts random horizontal bands out of a layer (revealing decks below). */
 export function makeTear(amount) {
   const n = 1 + Math.floor(Math.random() * (1 + amount / 20));
   const gaps = Array.from({ length: n }, () => {
@@ -26,21 +26,21 @@ export function makeTear(amount) {
     else merged.push([...g]);
   }
 
-  // Trace the kept regions as one polygon joined by zero-width segments on the left edge.
-  const pts = ['0% 0%', '100% 0%'];
+  // Hard-stop gradient: opaque everywhere except the gaps.
+  const stops = ['#000 0%'];
   for (const [a, b] of merged) {
     const A = a.toFixed(2), B = b.toFixed(2);
-    pts.push(`100% ${A}%`, `0% ${A}%`, `0% ${B}%`, `100% ${B}%`);
+    stops.push(`#000 ${A}%`, `transparent ${A}%`, `transparent ${B}%`, `#000 ${B}%`);
   }
-  pts.push('100% 100%', '0% 100%');
-  return `polygon(${pts.join(',')})`;
+  stops.push('#000 100%');
+  return `linear-gradient(to bottom, ${stops.join(', ')})`;
 }
 
 /** Per-deck animated state: shake, tear, strobe, hue cycle, blinds. */
 export class DeckGlitch {
   constructor() {
     this.tx = 0; this.ty = 0; this.skew = 0; this.shakeNext = 0;
-    this.clip = 'none'; this.tearNext = 0;
+    this.tear = null; this.tearNext = 0;
   }
 
   /** Returns the dynamic style values for this frame. */
@@ -49,7 +49,7 @@ export class DeckGlitch {
     if (kick) {
       this.shakeNext = 0;
       if (fx.tear > 0) {
-        this.clip = makeTear(fx.tear);
+        this.tear = makeTear(fx.tear);
         this.tearNext = now + 60 + Math.random() * 120;
       }
     }
@@ -70,11 +70,11 @@ export class DeckGlitch {
     // Tear: bursts of missing bands, more often and bigger as the amount rises.
     if (fx.tear > 0) {
       if (now >= this.tearNext) {
-        this.clip = Math.random() < (fx.tear / 100) * 0.8 ? makeTear(fx.tear) : 'none';
+        this.tear = Math.random() < (fx.tear / 100) * 0.8 ? makeTear(fx.tear) : null;
         this.tearNext = now + 50 + Math.random() * 220;
       }
     } else {
-      this.clip = 'none';
+      this.tear = null;
     }
 
     // Strobe: hard on/off flicker, 1–15 Hz.
@@ -87,17 +87,20 @@ export class DeckGlitch {
     // Hue cycle: up to one full rotation per second.
     const hue = fx.hueSpeed > 0 ? (fx.hue + (now / 1000) * fx.hueSpeed * 3.6) % 360 : fx.hue;
 
-    // Blinds: scrolling horizontal stripe mask.
-    let mask = 'none';
-    let maskPos = '0 0';
+    // Mask layers (intersected): tear bands and scrolling blinds.
+    const masks = [];
+    if (this.tear) masks.push({ image: this.tear, pos: '0 0', size: '100% 100%' });
     if (fx.blinds > 0) {
       const period = 16;
       const solid = (period * (1 - (fx.blinds / 100) * 0.9)).toFixed(2);
-      mask = `repeating-linear-gradient(to bottom, #000 0 ${solid}px, transparent ${solid}px ${period}px)`;
-      maskPos = `0 ${((now / 40) % period).toFixed(1)}px`;
+      masks.push({
+        image: `repeating-linear-gradient(to bottom, #000 0 ${solid}px, transparent ${solid}px ${period}px)`,
+        pos: `0 ${((now / 40) % period).toFixed(1)}px`,
+        size: 'auto',
+      });
     }
 
-    return { tx: this.tx, ty: this.ty, skew: this.skew, clip: this.clip, strobeOff, hue, mask, maskPos };
+    return { tx: this.tx, ty: this.ty, skew: this.skew, strobeOff, hue, masks };
   }
 }
 

@@ -2,6 +2,7 @@ import { h } from './dom.js';
 import { parseVideoId, parsePlaylistId, fetchPlaylistIds, fetchTitle, searchVideos } from './youtube.js';
 import { DeckGlitch } from './effects.js';
 import { REACT_BANDS } from './audio.js';
+import { WIPE_SHAPES, WIPE_LABELS, wipeClipPath } from './wipe.js';
 
 // YT.PlayerState values
 const PS = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
@@ -18,13 +19,17 @@ const TINT_MODES = ['color', 'hue', 'difference', 'exclusion', 'multiply', 'scre
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
+const CROP_MODES = { off: 'Off', window: 'Window (cut out)', tile: 'Tile (shrink into box)' };
+
 export const FX_DEFAULTS = {
   opacity: 1, blend: 'normal',
   hue: 0, sat: 100, contrast: 100, bright: 100, invert: 0, blur: 0,
   scale: 1, rotate: 0, flipX: false, flipY: false,
   tint: 0, tintColor: '#ff00aa', tintMode: 'color',
   hueSpeed: 0, shake: 0, tear: 0, blinds: 0, strobe: 0,
-  reactBand: 'bass', rOpacity: 0, rZoom: 0, rBright: 0, rHue: 0, rShake: 0, rTear: 0, rInvert: 0,
+  cropMode: 'off', cropW: 40, cropH: 40, cropX: 50, cropY: 50, cropSquare: true,
+  wipeShape: 'off', wipe: 50, wipeAngle: 0, wipeInvert: false, wipeSweep: 0, wipeSpin: 0,
+  reactBand: 'bass', rWipe: 0, rCrop: 0, rOpacity: 0, rZoom: 0, rBright: 0, rHue: 0, rShake: 0, rTear: 0, rInvert: 0,
 };
 
 const FX_GROUPS = [
@@ -59,6 +64,28 @@ const FX_GROUPS = [
     ],
   },
   {
+    title: 'Crop',
+    crop: true,
+    sliders: [
+      { key: 'cropW', label: 'Width', min: 2, max: 100, step: 1, unit: '%' },
+      { key: 'cropH', label: 'Height', min: 2, max: 100, step: 1, unit: '%' },
+      { key: 'cropX', label: 'X', min: 0, max: 100, step: 1, unit: '%' },
+      { key: 'cropY', label: 'Y', min: 0, max: 100, step: 1, unit: '%' },
+    ],
+    toggles: [{ key: 'cropSquare', label: 'Square (height follows width)' }],
+  },
+  {
+    title: 'Wipe',
+    wipe: true,
+    sliders: [
+      { key: 'wipe', label: 'Amount', min: 0, max: 100, step: 1, unit: '%' },
+      { key: 'wipeAngle', label: 'Angle', min: -180, max: 180, step: 1, unit: '°' },
+      { key: 'wipeSweep', label: 'Sweep', min: 0, max: 100, step: 1 },
+      { key: 'wipeSpin', label: 'Spin', min: -100, max: 100, step: 1 },
+    ],
+    toggles: [{ key: 'wipeInvert', label: 'Invert (show outside)' }],
+  },
+  {
     title: 'Audio react',
     react: true,
     sliders: [
@@ -69,6 +96,8 @@ const FX_GROUPS = [
       { key: 'rShake', label: 'Shake', min: 0, max: 100, step: 1 },
       { key: 'rTear', label: 'Tear', min: 0, max: 100, step: 1 },
       { key: 'rInvert', label: 'Invert', min: 0, max: 100, step: 1 },
+      { key: 'rWipe', label: 'Wipe', min: 0, max: 100, step: 1 },
+      { key: 'rCrop', label: 'Crop size', min: 0, max: 100, step: 1 },
     ],
   },
 ];
@@ -86,6 +115,9 @@ function modulate(fx, audio) {
     shake: Math.min(100, fx.shake + fx.rShake * m),
     tear: Math.min(100, fx.tear + fx.rTear * m),
     invert: Math.min(100, fx.invert + fx.rInvert * m),
+    wipe: Math.min(100, fx.wipe + fx.rWipe * m),
+    cropW: Math.min(100, fx.cropW * (1 + (fx.rCrop / 100) * m)),
+    cropH: Math.min(100, fx.cropH * (1 + (fx.rCrop / 100) * m)),
   };
 }
 
@@ -120,6 +152,8 @@ export function hydrateDeckState(saved, index) {
   if (!BLEND_MODES.includes(fx.blend)) fx.blend = d.fx.blend;
   if (!TINT_MODES.includes(fx.tintMode)) fx.tintMode = d.fx.tintMode;
   if (!REACT_BANDS.includes(fx.reactBand)) fx.reactBand = d.fx.reactBand;
+  if (!WIPE_SHAPES.includes(fx.wipeShape)) fx.wipeShape = d.fx.wipeShape;
+  if (!(fx.cropMode in CROP_MODES)) fx.cropMode = d.fx.cropMode;
   if (!/^#[0-9a-f]{6}$/i.test(fx.tintColor)) fx.tintColor = d.fx.tintColor;
   const num = (v, def) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
   return {
@@ -163,8 +197,15 @@ export class Deck {
     this.abGuard = 0;
 
     this.tintEl = h('div', { class: 'tint' });
-    this.layer = h('div', { class: 'layer' }, h('div', { id: `player-${index}` }), this.tintEl);
+    // layer: blend, filters, transform, wipe, masks.  frame (inside it): crop.
+    this.frameEl = h('div', { class: 'frame' }, h('div', { id: `player-${index}` }), this.tintEl);
+    this.layer = h('div', { class: 'layer' }, this.frameEl);
     stage.appendChild(this.layer);
+    // Wipe polygons are in px, so track the layer's size.
+    this.size = { w: 0, h: 0 };
+    new ResizeObserver(([entry]) => {
+      this.size = { w: entry.contentRect.width, h: entry.contentRect.height };
+    }).observe(this.layer);
 
     this.buildUI(mount);
     this.render(performance.now());
@@ -579,17 +620,63 @@ export class Deck {
     setStyle(layer, 'transform',
       `translate(${g.tx.toFixed(1)}px, ${g.ty.toFixed(1)}px) skewX(${g.skew.toFixed(1)}deg) rotate(${fx.rotate}deg) scale(${sx}, ${sy})`);
 
-    setStyle(layer, 'clipPath', g.clip);
-    setStyle(layer, 'maskImage', g.mask);
-    setStyle(layer, 'webkitMaskImage', g.mask);
-    setStyle(layer, 'maskPosition', g.maskPos);
-    setStyle(layer, 'webkitMaskPosition', g.maskPos);
+    this.renderCrop(fx);
+
+    // Wipe: Sweep swings the amount between 0 and the slider value; Spin rotates the shape.
+    let wipeP = fx.wipe / 100;
+    if (fx.wipeSweep > 0) wipeP *= 0.5 - 0.5 * Math.cos((now / 1000) * (fx.wipeSweep / 100) * 8);
+    const wipeAngle = fx.wipeAngle + (now / 1000) * fx.wipeSpin * 1.8;
+    setStyle(layer, 'clipPath', wipeClipPath(fx.wipeShape, wipeP, wipeAngle, fx.wipeInvert, this.size.w, this.size.h));
+
+    const m = g.masks;
+    const maskImage = m.length ? m.map((x) => x.image).join(', ') : 'none';
+    const maskPos = m.map((x) => x.pos).join(', ') || '0 0';
+    const maskSize = m.map((x) => x.size).join(', ') || 'auto';
+    setStyle(layer, 'maskImage', maskImage);
+    setStyle(layer, 'webkitMaskImage', maskImage);
+    setStyle(layer, 'maskPosition', maskPos);
+    setStyle(layer, 'webkitMaskPosition', maskPos);
+    setStyle(layer, 'maskSize', maskSize);
+    setStyle(layer, 'webkitMaskSize', maskSize);
 
     const tint = this.tintEl;
     setStyle(tint, 'display', fx.tint > 0 ? 'block' : 'none');
     setStyle(tint, 'background', fx.tintColor);
     setStyle(tint, 'mixBlendMode', fx.tintMode);
     setStyle(tint, 'opacity', String(fx.tint / 100));
+  }
+
+  /** Window: clip the full-size video to the box. Tile: shrink the whole video into the box. */
+  renderCrop(fx) {
+    const f = this.frameEl;
+    const { w: W, h: H } = this.size;
+    const full = () => {
+      setStyle(f, 'left', '0px');
+      setStyle(f, 'top', '0px');
+      setStyle(f, 'width', '100%');
+      setStyle(f, 'height', '100%');
+    };
+    if (fx.cropMode === 'off' || !W || !H) {
+      full();
+      setStyle(f, 'clipPath', 'none');
+      return;
+    }
+    const bw = (fx.cropW / 100) * W;
+    const bh = fx.cropSquare ? bw : (fx.cropH / 100) * H;
+    const bx = (fx.cropX / 100) * W - bw / 2;
+    const by = (fx.cropY / 100) * H - bh / 2;
+    const px = (v) => `${v.toFixed(1)}px`;
+    if (fx.cropMode === 'window') {
+      full();
+      const inset = [by, W - bx - bw, H - by - bh, bx].map((v) => px(Math.max(0, v)));
+      setStyle(f, 'clipPath', `inset(${inset.join(' ')})`);
+    } else {
+      setStyle(f, 'left', px(bx));
+      setStyle(f, 'top', px(by));
+      setStyle(f, 'width', px(bw));
+      setStyle(f, 'height', px(bh));
+      setStyle(f, 'clipPath', 'none');
+    }
   }
 
   setFx(key, value) {
@@ -728,6 +815,26 @@ export class Deck {
       return h('label', { class: 'slider' }, h('span', {}, sl.label), input, out);
     };
 
+    const cropControls = () => {
+      const mode = h('select', { value: fx.cropMode, onchange: (e) => this.setFx('cropMode', e.target.value) },
+        Object.entries(CROP_MODES).map(([k, label]) => h('option', { value: k }, label)));
+      this.fxInputs.cropMode = { input: mode };
+      return h('div', { class: 'row' }, mode);
+    };
+
+    const wipeControls = () => {
+      const shape = h('select', { value: fx.wipeShape, onchange: (e) => this.setFx('wipeShape', e.target.value) },
+        WIPE_SHAPES.map((w) => h('option', { value: w }, WIPE_LABELS[w])));
+      this.fxInputs.wipeShape = { input: shape };
+      const preset = (label, angle, title) => h('button', {
+        type: 'button', title,
+        onclick: () => { this.setFx('wipeAngle', angle); this.syncFxInputs(); },
+      }, label);
+      return h('div', { class: 'row' }, shape,
+        preset('H', 0, 'Horizontal (0°)'), preset('V', 90, 'Vertical (90°)'),
+        preset('↘', 45, 'Diagonal (45°)'), preset('↗', -45, 'Diagonal (−45°)'));
+    };
+
     const reactControls = () => {
       const band = h('select', { value: fx.reactBand, title: 'Which part of the sound drives this deck', onchange: (e) => this.setFx('reactBand', e.target.value) },
         REACT_BANDS.map((b) => h('option', { value: b }, b === 'beat' ? 'beat (kicks)' : b)));
@@ -748,6 +855,8 @@ export class Deck {
       h('h4', {}, g.title),
       g.tint && tintControls(),
       g.react && reactControls(),
+      g.wipe && wipeControls(),
+      g.crop && cropControls(),
       g.sliders.map(slider),
       g.toggles && h('div', { class: 'checks' }, g.toggles.map((t) => {
         const input = h('input', { type: 'checkbox', checked: fx[t.key], onchange: (e) => this.setFx(t.key, e.target.checked) });
