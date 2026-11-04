@@ -20,9 +20,22 @@
       <label class="master" title="Glitch bars over all decks">
         <span>Bars</span><input id="masterBars" type="range" min="0" max="100" step="1" value="0">
       </label>
+      <label class="master" title="Glitch bars burst on every kick (needs audio)">
+        <span>Kick</span><input id="masterKick" type="range" min="0" max="100" step="1" value="0">
+      </label>
       <label class="master" title="Scanlines over all decks">
         <span>Scanlines</span><input id="masterScan" type="range" min="0" max="100" step="1" value="0">
       </label>
+      <span class="audio-ctl" title="Sound source for Audio react effects">
+        <span>Audio</span>
+        <span class="seg">
+          <button type="button" data-audio="off" class="active">Off</button>
+          <button type="button" data-audio="tab" title="Listen to this tab (pick this tab + Share tab audio; unmute a deck)">Tab</button>
+          <button type="button" data-audio="mic" title="Listen to a microphone or line input">Mic</button>
+        </span>
+        <canvas id="meter" width="60" height="18" title="bass · mid · high · kick"></canvas>
+        <span>Sens</span><input id="audioSens" type="range" min="0" max="100" step="1" value="50" title="Sensitivity">
+      </span>
       <span class="spacer"></span>
       <form class="apikey" onsubmit="return false" title="Optional: lets Search load 10 results straight into a deck">
         <label for="apiKey">API key</label>

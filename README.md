@@ -22,6 +22,7 @@ python3 -m http.server 8000
   - **Paste links**: video links, IDs or **playlist links**. A playlist link imports the whole playlist, up to 200 videos.
   - **Search**: opens YouTube search in a popup to drag videos from. If you add an API key (see below), Search instead loads the top 10 results straight into the deck.
 - **Loop** on: repeats the current clip. Loop off: moves to the next clip when this one ends, wrapping at the end of the playlist.
+- **In / Out**: mark a section of the clip to repeat. **Out** starts the loop; if no In is set, the loop is the last half second. **A-B** switches it on and off. **÷2 / ×2** halve or double the section while it plays, so pressing ÷2 repeatedly gives a stutter roll. YouTube takes a moment to jump back, so loops under about 0.25s get ragged. The section resets when the clip changes.
 - Clips that can't be embedded are skipped automatically and struck through.
 - **Share** copies a link that opens the app with every deck's playlist, loop setting and effects already loaded. The set is stored in the link itself, so no server is needed.
 - Your decks are also saved in this browser between visits.
@@ -40,7 +41,21 @@ Per deck:
   - **Blinds**: scrolling stripes.
   - **Strobe**.
 
-Master (over everything): **Bars** (random inverted and color-shifted strips) and **Scanlines**.
+Master (over everything): **Bars** (random inverted and color-shifted strips), **Kick** (bars burst on each detected kick) and **Scanlines**.
+
+### Sound-reactive effects
+
+Pick an **Audio** source in the top bar:
+- **Tab**: listens to this tab's own sound, which means the YouTube decks. In Chrome's picker, choose this tab and keep **Share tab audio** on. At least one deck must be unmuted.
+- **Mic**: listens to a microphone or line input. This works with every deck muted, for example when the music comes from a DJ mixer.
+
+The meter shows bass, mid and high levels and flashes on each kick. **Sens** sets how easily things trigger.
+
+Each deck's **Audio react** section (under Effects) chooses what it follows (bass, mid, high, level, or kicks) and how hard each effect responds:
+- **Pump**: opacity follows the sound.
+- **Zoom**, **Flash**, **Hue push**, **Shake**, **Tear** and **Invert**.
+
+Shake and tear also fire immediately on every kick.
 
 Double-click any slider to reset it.
 

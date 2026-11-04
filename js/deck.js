@@ -1,6 +1,7 @@
 import { h } from './dom.js';
 import { parseVideoId, parsePlaylistId, fetchPlaylistIds, fetchTitle, searchVideos } from './youtube.js';
 import { DeckGlitch } from './effects.js';
+import { REACT_BANDS } from './audio.js';
 
 // YT.PlayerState values
 const PS = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
@@ -23,6 +24,7 @@ export const FX_DEFAULTS = {
   scale: 1, rotate: 0, flipX: false, flipY: false,
   tint: 0, tintColor: '#ff00aa', tintMode: 'color',
   hueSpeed: 0, shake: 0, tear: 0, blinds: 0, strobe: 0,
+  reactBand: 'bass', rOpacity: 0, rZoom: 0, rBright: 0, rHue: 0, rShake: 0, rTear: 0, rInvert: 0,
 };
 
 const FX_GROUPS = [
@@ -56,7 +58,36 @@ const FX_GROUPS = [
       { key: 'strobe', label: 'Strobe', min: 0, max: 100, step: 1 },
     ],
   },
+  {
+    title: 'Audio react',
+    react: true,
+    sliders: [
+      { key: 'rOpacity', label: 'Pump', min: 0, max: 100, step: 1 },
+      { key: 'rZoom', label: 'Zoom', min: 0, max: 100, step: 1 },
+      { key: 'rBright', label: 'Flash', min: 0, max: 100, step: 1 },
+      { key: 'rHue', label: 'Hue push', min: 0, max: 100, step: 1 },
+      { key: 'rShake', label: 'Shake', min: 0, max: 100, step: 1 },
+      { key: 'rTear', label: 'Tear', min: 0, max: 100, step: 1 },
+      { key: 'rInvert', label: 'Invert', min: 0, max: 100, step: 1 },
+    ],
+  },
 ];
+
+/** Applies audio modulation on top of the deck's settings (no-op while audio is off). */
+function modulate(fx, audio) {
+  if (!audio?.active) return fx;
+  const m = audio.value(fx.reactBand);
+  return {
+    ...fx,
+    opacity: fx.opacity * (1 - (fx.rOpacity / 100) * (1 - m)),
+    scale: fx.scale * (1 + (fx.rZoom / 100) * m * 0.6),
+    bright: fx.bright + fx.rBright * m * 2,
+    hue: fx.hue + fx.rHue * m * 1.8,
+    shake: Math.min(100, fx.shake + fx.rShake * m),
+    tear: Math.min(100, fx.tear + fx.rTear * m),
+    invert: Math.min(100, fx.invert + fx.rInvert * m),
+  };
+}
 
 export function defaultDeckState(index) {
   return {
@@ -88,6 +119,7 @@ export function hydrateDeckState(saved, index) {
   }
   if (!BLEND_MODES.includes(fx.blend)) fx.blend = d.fx.blend;
   if (!TINT_MODES.includes(fx.tintMode)) fx.tintMode = d.fx.tintMode;
+  if (!REACT_BANDS.includes(fx.reactBand)) fx.reactBand = d.fx.reactBand;
   if (!/^#[0-9a-f]{6}$/i.test(fx.tintColor)) fx.tintColor = d.fx.tintColor;
   const num = (v, def) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
   return {
@@ -111,8 +143,9 @@ function setStyle(el, prop, value) {
 }
 
 export class Deck {
-  constructor({ index, state, stage, mount, onChange, getApiKey }) {
+  constructor({ index, state, stage, mount, onChange, getApiKey, audio }) {
     this.index = index;
+    this.audio = audio;
     this.state = state;
     this.onChange = onChange;
     this.getApiKey = getApiKey;
@@ -126,6 +159,8 @@ export class Deck {
     this.lastPoll = 0;
     this.errorStreak = 0;
     this.glitch = new DeckGlitch();
+    this.ab = { in: null, out: null, active: false };   // in/out loop points for the current clip (not saved)
+    this.abGuard = 0;
 
     this.tintEl = h('div', { class: 'tint' });
     this.layer = h('div', { class: 'layer' }, h('div', { id: `player-${index}` }), this.tintEl);
@@ -209,7 +244,10 @@ export class Deck {
   handleEnd() {
     if (performance.now() < this.suppressUntil) return;
     this.suppressUntil = performance.now() + 1500;
-    if (this.state.loop) {
+    if (this.ab.active) {
+      this.player.seekTo(this.ab.in, true);
+      this.player.playVideo();
+    } else if (this.state.loop) {
       this.player.seekTo(0, true);
       this.player.playVideo();
     } else {
@@ -220,7 +258,12 @@ export class Deck {
   /** Per-frame: draw effects; catch the end of a clip slightly early so YouTube's end screen never shows. */
   tick(now) {
     this.render(now);
-    if (!this.ready || this.playerState !== PS.PLAYING || now < this.suppressUntil) return;
+    if (!this.ready || this.playerState !== PS.PLAYING) return;
+    if (this.ab.active) {
+      this.enforceAB(now);
+      return;
+    }
+    if (now < this.suppressUntil) return;
     if (now - this.lastPoll < 100) return;
     this.lastPoll = now;
     const d = this.player.getDuration();
@@ -235,6 +278,7 @@ export class Deck {
     if (!item) return;
     this.state.index = i;
     this.suppressUntil = performance.now() + 1500;
+    this.clearAB();
     if (this.ready) {
       if (autoplay) this.player.loadVideoById(item.id);
       else this.player.cueVideoById(item.id);
@@ -266,6 +310,72 @@ export class Deck {
       return;
     }
     this.load((this.state.index - 1 + n) % n);
+  }
+
+  // ------------------------------------------------------- in/out loop (A-B)
+
+  /** Jumps back to the in point whenever playback passes the out point. Checked every frame. */
+  enforceAB(now) {
+    if (now < this.abGuard) return;          // give a fresh seek a moment to report its new time
+    const t = this.player.getCurrentTime();
+    if (t >= this.ab.out || t < this.ab.in - 0.1) {
+      this.player.seekTo(this.ab.in, true);
+      this.abGuard = now + 50;
+    }
+  }
+
+  currentTime() {
+    return this.ready && this.hasVideo ? this.player.getCurrentTime() : null;
+  }
+
+  setIn() {
+    const t = this.currentTime();
+    if (t == null) return;
+    this.ab.in = t;
+    if (this.ab.out != null && this.ab.out - t < 0.05) {
+      this.ab.out = null;
+      this.ab.active = false;
+    }
+    this.renderAB();
+  }
+
+  setOut() {
+    const t = this.currentTime();
+    if (t == null) return;
+    if (this.ab.in == null || this.ab.in >= t - 0.05) this.ab.in = Math.max(0, t - 0.5);
+    this.ab.out = t;
+    this.activateAB();
+  }
+
+  activateAB() {
+    if (this.ab.in == null || this.ab.out == null) return;
+    this.ab.active = true;
+    this.player.seekTo(this.ab.in, true);
+    this.abGuard = performance.now() + 50;
+    this.renderAB();
+  }
+
+  toggleAB() {
+    if (this.ab.active) {
+      this.ab.active = false;
+      this.renderAB();
+    } else {
+      this.activateAB();
+    }
+  }
+
+  /** Halve (0.5) or double (2) the loop length, keeping the in point. */
+  scaleAB(factor) {
+    if (this.ab.in == null || this.ab.out == null) return;
+    const len = Math.max(0.05, (this.ab.out - this.ab.in) * factor);
+    const dur = this.ready ? this.player.getDuration() : 0;
+    this.ab.out = dur > 0 ? Math.min(dur, this.ab.in + len) : this.ab.in + len;
+    this.renderAB();
+  }
+
+  clearAB() {
+    this.ab = { in: null, out: null, active: false };
+    if (this.ui) this.renderAB();
   }
 
   stopPlayback() {
@@ -446,8 +556,8 @@ export class Deck {
 
   /** Writes the layer's styles for this frame (static settings + animated glitch state). */
   render(now) {
-    const fx = this.state.fx;
-    const g = this.glitch.frame(now, fx);
+    const fx = modulate(this.state.fx, this.audio);
+    const g = this.glitch.frame(now, fx, !!this.audio?.onset);
     const visible = this.state.on && this.hasVideo;   // idle players never show YouTube's placeholder UI
     const layer = this.layer;
 
@@ -526,6 +636,13 @@ export class Deck {
       onchange: (e) => this.setRate(parseFloat(e.target.value)),
     }, RATES.map((r) => h('option', { value: String(r) }, `${r}×`)));
 
+    ui.abIn = h('button', { type: 'button', title: 'Set loop in point at the current time', onclick: () => this.setIn() }, 'In');
+    ui.abOut = h('button', { type: 'button', title: 'Set loop out point here and start looping (no in point = last half second)', onclick: () => this.setOut() }, 'Out');
+    ui.abToggle = h('button', { type: 'button', title: 'Turn the in/out loop on or off', onclick: () => this.toggleAB() }, 'A-B');
+    ui.abHalf = h('button', { type: 'button', title: 'Halve the loop (stutter roll)', onclick: () => this.scaleAB(0.5) }, '÷2');
+    ui.abDouble = h('button', { type: 'button', title: 'Double the loop', onclick: () => this.scaleAB(2) }, '×2');
+    ui.abLabel = h('span', { class: 'ab-label' });
+
     ui.status = h('div', { class: 'status' });
     ui.list = h('ol', { class: 'playlist' });
 
@@ -555,6 +672,7 @@ export class Deck {
       ui.now,
       h('div', { class: 'row' }, ui.prev, ui.play, ui.next, ui.loop, ui.rate),
       h('div', { class: 'row' }, ui.mute, ui.volume, clearBtn),
+      h('div', { class: 'row' }, ui.abIn, ui.abOut, ui.abToggle, ui.abHalf, ui.abDouble, ui.abLabel),
       ui.list,
       addForm,
       searchForm,
@@ -610,6 +728,13 @@ export class Deck {
       return h('label', { class: 'slider' }, h('span', {}, sl.label), input, out);
     };
 
+    const reactControls = () => {
+      const band = h('select', { value: fx.reactBand, title: 'Which part of the sound drives this deck', onchange: (e) => this.setFx('reactBand', e.target.value) },
+        REACT_BANDS.map((b) => h('option', { value: b }, b === 'beat' ? 'beat (kicks)' : b)));
+      this.fxInputs.reactBand = { input: band };
+      return h('div', { class: 'row' }, h('span', {}, 'Follows'), band);
+    };
+
     const tintControls = () => {
       const color = h('input', { type: 'color', value: fx.tintColor, oninput: (e) => this.setFx('tintColor', e.target.value) });
       const mode = h('select', { value: fx.tintMode, onchange: (e) => this.setFx('tintMode', e.target.value) },
@@ -622,6 +747,7 @@ export class Deck {
     const groups = FX_GROUPS.map((g) => h('div', { class: 'fx-group' },
       h('h4', {}, g.title),
       g.tint && tintControls(),
+      g.react && reactControls(),
       g.sliders.map(slider),
       g.toggles && h('div', { class: 'checks' }, g.toggles.map((t) => {
         const input = h('input', { type: 'checkbox', checked: fx[t.key], onchange: (e) => this.setFx(t.key, e.target.checked) });
@@ -652,7 +778,22 @@ export class Deck {
     this.ui.status.classList.toggle('err', isError);
   }
 
+  renderAB() {
+    const { in: a, out: b, active } = this.ab;
+    const fmt = (t) => {
+      const m = Math.floor(t / 60);
+      return `${m}:${(t - m * 60).toFixed(2).padStart(5, '0')}`;
+    };
+    this.ui.abToggle.classList.toggle('active', active);
+    this.ui.abIn.classList.toggle('set', a != null);
+    this.ui.abOut.classList.toggle('set', b != null);
+    this.ui.abLabel.textContent = a == null ? ''
+      : b == null ? `${fmt(a)} →`
+        : `${fmt(a)} → ${fmt(b)} (${(b - a).toFixed(2)}s)`;
+  }
+
   renderAll() {
+    this.renderAB();
     this.renderHeader();
     this.renderNowPlaying();
     this.renderTransport();

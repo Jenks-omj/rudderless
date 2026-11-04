@@ -109,6 +109,14 @@ html, body {
 .keys { color: var(--muted); }
 .master { display: flex; align-items: center; gap: 6px; color: var(--muted); }
 .master input { width: 90px; }
+.audio-ctl { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.audio-ctl input { width: 70px; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 4px 4px 0; }
+.seg button.active { --accent: #e8e8ee; }
+#meter { background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); border-radius: 3px; }
 
 #decks {
   display: grid;
@@ -131,6 +139,8 @@ html, body {
 }
 .deck.off { border-top-color: var(--line); opacity: 0.65; }
 .deck.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.ab-label { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+button.set { border-color: var(--accent); }
 
 .deck-head { display: flex; align-items: center; gap: 8px; }
 .deck-name { font-weight: 600; }

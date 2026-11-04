@@ -44,7 +44,16 @@ export class DeckGlitch {
   }
 
   /** Returns the dynamic style values for this frame. */
-  frame(now, fx) {
+  frame(now, fx, kick = false) {
+    // On a detected kick, fire shake/tear immediately instead of waiting for the next random tick.
+    if (kick) {
+      this.shakeNext = 0;
+      if (fx.tear > 0) {
+        this.clip = makeTear(fx.tear);
+        this.tearNext = now + 60 + Math.random() * 120;
+      }
+    }
+
     // Shake: jittery translate, with occasional skew kicks.
     if (fx.shake > 0) {
       if (now >= this.shakeNext) {
@@ -116,9 +125,11 @@ export class MasterFx {
     this.scan.style.opacity = String(this.state.scan / 100);
   }
 
-  tick(now) {
-    const amt = this.state.bars;
+  tick(now, audio) {
+    const kick = audio?.active ? audio.value('beat') : 0;
+    const amt = Math.min(100, this.state.bars + this.state.kick * kick);
     for (const bar of this.bars) {
+      if (audio?.onset && this.state.kick > 0) bar.next = 0;
       if (amt <= 0) {
         if (bar.el.style.display !== 'none') bar.el.style.display = 'none';
         continue;
