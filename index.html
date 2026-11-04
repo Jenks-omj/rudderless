@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rudderless VJ</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Output: one absolutely-positioned layer per deck, stacked in deck order -->
+  <div id="stage"></div>
+
+  <!-- SVG filter definitions (one filter per deck, built by js/effects.js).
+       Must not be display:none or the filters stop working. -->
+  <svg id="fx-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs></defs></svg>
+
+  <div id="panel">
+    <header class="topbar">
+      <span class="brand">rudderless</span>
+      <button id="btnFullscreen" type="button" title="Fullscreen (F)">Fullscreen</button>
+      <button id="btnHide" type="button" title="Hide controls (H)">Hide panel</button>
+      <button id="btnBlackout" type="button" title="Blackout (B)">Blackout</button>
+      <span class="spacer"></span>
+      <form class="apikey" onsubmit="return false">
+        <label for="apiKey">YouTube API key</label>
+        <input id="apiKey" type="password" placeholder="needed for search" autocomplete="off" spellcheck="false">
+      </form>
+      <a class="hint" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">get one</a>
+      <span class="keys">1–4 deck on/off · H panel · F fullscreen · B blackout</span>
+    </header>
+    <div id="decks"></div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
