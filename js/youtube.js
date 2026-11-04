@@ -38,6 +38,77 @@ export function parseVideoId(input) {
   return null;
 }
 
+/**
+ * Returns a playlist ID for playlist links (youtube.com/playlist?list=…, or a list
+ * link with no video), or a bare playlist ID. A watch link that also carries
+ * list= is treated as a single video, so copying one clip out of a mix adds one clip.
+ */
+export function parsePlaylistId(input) {
+  const s = String(input).trim();
+  if (/^(PL|OL|UU|FL)[\w-]{10,}$/.test(s)) return s;
+  try {
+    const u = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
+    const host = u.hostname.replace(/^(www|m|music)\./, '');
+    if (host !== 'youtube.com') return null;
+    const list = u.searchParams.get('list');
+    if (list && /^[\w-]{10,}$/.test(list) && !u.searchParams.get('v')) return list;
+  } catch { /* not a URL */ }
+  return null;
+}
+
+/**
+ * Lists a playlist's video IDs without an API key: a hidden YouTube player loads the
+ * playlist and reports its contents (up to 200 videos).
+ */
+export function fetchPlaylistIds(YT, listId, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-10000px;top:0;width:320px;height:180px;pointer-events:none';
+    const target = document.createElement('div');
+    host.appendChild(target);
+    document.body.appendChild(host);
+
+    let done = false;
+    let poll;
+    let player;
+    const finish = (err, ids) => {
+      if (done) return;
+      done = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      try { player?.destroy(); } catch { /* ignore */ }
+      host.remove();
+      if (err) reject(err);
+      else resolve(ids);
+    };
+    const timer = setTimeout(
+      () => finish(new Error('Playlist took too long to load — is it public?')),
+      timeoutMs,
+    );
+    const current = () => {
+      const ids = player?.getPlaylist?.();
+      return Array.isArray(ids) && ids.length ? ids : null;
+    };
+
+    player = new YT.Player(target, {
+      width: 320,
+      height: 180,
+      playerVars: { listType: 'playlist', list: listId, autoplay: 0, mute: 1, origin: location.origin },
+      events: {
+        onReady: () => {
+          poll = setInterval(() => { const ids = current(); if (ids) finish(null, ids); }, 250);
+        },
+        // The first video failing doesn't mean the list failed.
+        onError: () => {
+          const ids = current();
+          if (ids) finish(null, ids);
+          else finish(new Error('Could not load that playlist (private or unavailable)'));
+        },
+      },
+    });
+  });
+}
+
 /** Title lookup via oEmbed (no API key needed). Returns null on failure. */
 export async function fetchTitle(id) {
   try {

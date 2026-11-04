@@ -1,144 +1,140 @@
-// Per-deck SVG filter chain. Only the stages that are switched on get built,
-// so a deck with all glitch effects at 0 pays no filter cost at all.
+// Glitch effects that work on cross-origin iframes.
 //
-// Stages (in order): warp → rgb split → posterize → edges
+// Chrome refuses to run SVG pixel filters (displacement, channel split, …) on
+// embedded YouTube players, because the page isn't allowed to read their pixels.
+// What *does* work is anything the compositor does without reading pixels:
+// CSS filters, transforms, clip-path, masks, blend-mode overlays and
+// backdrop-filter strips. Everything here is built from those.
 
-const NS = 'http://www.w3.org/2000/svg';
+import { h } from './dom.js';
 
-function svg(tag, attrs = {}) {
-  const el = document.createElementNS(NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  return el;
+const rand = (a = 1) => (Math.random() * 2 - 1) * a;
+
+/** clip-path that cuts random horizontal bands out of a layer (revealing decks below). */
+export function makeTear(amount) {
+  const n = 1 + Math.floor(Math.random() * (1 + amount / 20));
+  const gaps = Array.from({ length: n }, () => {
+    const hgt = 1 + Math.random() * amount * 0.12;
+    const y = Math.random() * (100 - hgt);
+    return [y, y + hgt];
+  }).sort((a, b) => a[0] - b[0]);
+
+  const merged = [];
+  for (const g of gaps) {
+    const last = merged[merged.length - 1];
+    if (last && g[0] <= last[1]) last[1] = Math.max(last[1], g[1]);
+    else merged.push([...g]);
+  }
+
+  // Trace the kept regions as one polygon joined by zero-width segments on the left edge.
+  const pts = ['0% 0%', '100% 0%'];
+  for (const [a, b] of merged) {
+    const A = a.toFixed(2), B = b.toFixed(2);
+    pts.push(`100% ${A}%`, `0% ${A}%`, `0% ${B}%`, `100% ${B}%`);
+  }
+  pts.push('100% 100%', '0% 100%');
+  return `polygon(${pts.join(',')})`;
 }
 
-const ISOLATE = {
-  r: '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0',
-  g: '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0',
-  b: '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0',
-};
-
-export class DeckEffects {
-  constructor(index, defs) {
-    this.id = `fx-deck-${index}`;
-    this.filter = svg('filter', {
-      id: this.id,
-      x: 0, y: 0, width: 1, height: 1,
-      'color-interpolation-filters': 'sRGB',
-    });
-    defs.appendChild(this.filter);
-    this.signature = null;
-    this.n = {};
-    this.nextJitter = 0;
+/** Per-deck animated state: shake, tear, strobe, hue cycle, blinds. */
+export class DeckGlitch {
+  constructor() {
+    this.tx = 0; this.ty = 0; this.skew = 0; this.shakeNext = 0;
+    this.clip = 'none'; this.tearNext = 0;
   }
 
-  static stagesFor(fx) {
-    const s = [];
-    if (fx.warp > 0) s.push('warp');
-    if (fx.rgb > 0) s.push('rgb');
-    if (fx.posterize > 0) s.push('posterize');
-    if (fx.edges > 0) s.push('edges');
-    return s;
-  }
-
-  /** Rebuilds the chain if the set of active stages changed; returns the CSS url() or ''. */
-  sync(fx) {
-    const stages = DeckEffects.stagesFor(fx);
-    const sig = stages.join('|');
-    if (sig !== this.signature) {
-      this.build(stages);
-      this.signature = sig;
-    }
-    this.update(fx);
-    return stages.length ? `url(#${this.id})` : '';
-  }
-
-  build(stages) {
-    const f = this.filter;
-    f.replaceChildren();
-    this.n = {};
-    let input = 'SourceGraphic';
-
-    for (const stage of stages) {
-      if (stage === 'warp') {
-        this.n.turb = svg('feTurbulence', {
-          type: 'fractalNoise', baseFrequency: '0.006 0.009', numOctaves: 2, seed: 7, result: 'noise',
-        });
-        this.n.disp = svg('feDisplacementMap', {
-          in: input, in2: 'noise', scale: 0, xChannelSelector: 'R', yChannelSelector: 'G', result: 'warped',
-        });
-        f.append(this.n.turb, this.n.disp);
-        input = 'warped';
-      } else if (stage === 'rgb') {
-        // Split into R, G, B, shift R and B in opposite directions, screen them back together.
-        for (const c of ['r', 'g', 'b']) {
-          f.append(svg('feColorMatrix', { in: input, type: 'matrix', values: ISOLATE[c], result: `ch_${c}` }));
-        }
-        this.n.offR = svg('feOffset', { in: 'ch_r', dx: 0, dy: 0, result: 'off_r' });
-        this.n.offB = svg('feOffset', { in: 'ch_b', dx: 0, dy: 0, result: 'off_b' });
-        f.append(
-          this.n.offR,
-          this.n.offB,
-          svg('feBlend', { in: 'off_r', in2: 'ch_g', mode: 'screen', result: 'rg' }),
-          svg('feBlend', { in: 'rg', in2: 'off_b', mode: 'screen', result: 'split' }),
-        );
-        input = 'split';
-      } else if (stage === 'posterize') {
-        const ct = svg('feComponentTransfer', { in: input, result: 'poster' });
-        this.n.post = ['feFuncR', 'feFuncG', 'feFuncB'].map((t) => svg(t, { type: 'discrete', tableValues: '0 1' }));
-        ct.append(...this.n.post);
-        f.append(ct);
-        input = 'poster';
-      } else if (stage === 'edges') {
-        f.append(svg('feConvolveMatrix', {
-          in: input, order: 3, kernelMatrix: '-1 -1 -1 -1 8 -1 -1 -1 -1', preserveAlpha: 'true', result: 'edge',
-        }));
-        // Crossfade original → edge-detected: k2*in + k3*in2
-        this.n.edgeMix = svg('feComposite', {
-          in: input, in2: 'edge', operator: 'arithmetic', k1: 0, k2: 1, k3: 0, k4: 0, result: 'edged',
-        });
-        f.append(this.n.edgeMix);
-        input = 'edged';
+  /** Returns the dynamic style values for this frame. */
+  frame(now, fx) {
+    // Shake: jittery translate, with occasional skew kicks.
+    if (fx.shake > 0) {
+      if (now >= this.shakeNext) {
+        const amp = fx.shake * 0.4;
+        this.tx = rand(amp);
+        this.ty = rand(amp * 0.5);
+        this.skew = Math.random() < fx.shake / 300 ? rand(fx.shake * 0.2) : 0;
+        this.shakeNext = now + 40 + Math.random() * 90;
       }
+    } else {
+      this.tx = this.ty = this.skew = 0;
     }
+
+    // Tear: bursts of missing bands, more often and bigger as the amount rises.
+    if (fx.tear > 0) {
+      if (now >= this.tearNext) {
+        this.clip = Math.random() < (fx.tear / 100) * 0.8 ? makeTear(fx.tear) : 'none';
+        this.tearNext = now + 50 + Math.random() * 220;
+      }
+    } else {
+      this.clip = 'none';
+    }
+
+    // Strobe: hard on/off flicker, 1–15 Hz.
+    let strobeOff = false;
+    if (fx.strobe > 0) {
+      const hz = 1 + fx.strobe * 0.14;
+      strobeOff = Math.floor((now / 1000) * hz * 2) % 2 === 1;
+    }
+
+    // Hue cycle: up to one full rotation per second.
+    const hue = fx.hueSpeed > 0 ? (fx.hue + (now / 1000) * fx.hueSpeed * 3.6) % 360 : fx.hue;
+
+    // Blinds: scrolling horizontal stripe mask.
+    let mask = 'none';
+    let maskPos = '0 0';
+    if (fx.blinds > 0) {
+      const period = 16;
+      const solid = (period * (1 - (fx.blinds / 100) * 0.9)).toFixed(2);
+      mask = `repeating-linear-gradient(to bottom, #000 0 ${solid}px, transparent ${solid}px ${period}px)`;
+      maskPos = `0 ${((now / 40) % period).toFixed(1)}px`;
+    }
+
+    return { tx: this.tx, ty: this.ty, skew: this.skew, clip: this.clip, strobeOff, hue, mask, maskPos };
+  }
+}
+
+const BAR_FILTERS = [
+  'invert(1)',
+  'hue-rotate(90deg) saturate(4)',
+  'hue-rotate(200deg) saturate(3)',
+  'contrast(4) brightness(1.4)',
+  'grayscale(1) contrast(3)',
+  'invert(1) hue-rotate(180deg)',
+  'blur(6px) saturate(3)',
+];
+
+/** Master effects drawn over all decks: glitch bars and scanlines. */
+export class MasterFx {
+  constructor(stage, state) {
+    this.state = state;
+    this.bars = Array.from({ length: 6 }, () => ({ el: h('div', { class: 'glitch-bar' }), next: 0 }));
+    this.scan = h('div', { class: 'scanlines' });
+    stage.append(...this.bars.map((b) => b.el), this.scan);
+    this.apply();
   }
 
-  /** Pushes static parameter values into the existing chain. */
-  update(fx) {
-    if (this.n.disp) this.n.disp.setAttribute('scale', String(fx.warp * 2.5));
-    if (this.n.offR && !fx.rgbJitter) {
-      this.n.offR.setAttribute('dx', String(fx.rgb));
-      this.n.offR.setAttribute('dy', '0');
-      this.n.offB.setAttribute('dx', String(-fx.rgb));
-      this.n.offB.setAttribute('dy', '0');
-    }
-    if (this.n.post) {
-      const levels = Math.max(2, 12 - Math.round(fx.posterize));
-      const table = Array.from({ length: levels }, (_, i) => (i / (levels - 1)).toFixed(3)).join(' ');
-      for (const fn of this.n.post) fn.setAttribute('tableValues', table);
-    }
-    if (this.n.edgeMix) {
-      const a = fx.edges / 100;
-      this.n.edgeMix.setAttribute('k2', String(1 - a));
-      this.n.edgeMix.setAttribute('k3', String(a * 1.6));
-    }
+  apply() {
+    this.scan.style.opacity = String(this.state.scan / 100);
   }
 
-  /** Per-frame animation (warp drift, rgb jitter). */
-  tick(now, fx) {
-    if (this.n.turb && fx.warpSpeed > 0) {
-      const phase = (now / 1000) * (fx.warpSpeed / 100) * 2;
-      const fx_ = 0.004 + 0.003 * Math.sin(phase);
-      const fy = 0.006 + 0.004 * Math.cos(phase * 1.3);
-      this.n.turb.setAttribute('baseFrequency', `${fx_.toFixed(5)} ${fy.toFixed(5)}`);
-    }
-    if (this.n.offR && fx.rgbJitter && now >= this.nextJitter) {
-      const a = fx.rgb;
-      const r = () => (Math.random() * 2 - 1) * a;
-      this.n.offR.setAttribute('dx', r().toFixed(1));
-      this.n.offR.setAttribute('dy', (r() * 0.3).toFixed(1));
-      this.n.offB.setAttribute('dx', r().toFixed(1));
-      this.n.offB.setAttribute('dy', (r() * 0.3).toFixed(1));
-      this.nextJitter = now + 30 + Math.random() * 160; // hold each glitch for a random beat
+  tick(now) {
+    const amt = this.state.bars;
+    for (const bar of this.bars) {
+      if (amt <= 0) {
+        if (bar.el.style.display !== 'none') bar.el.style.display = 'none';
+        continue;
+      }
+      if (now < bar.next) continue;
+      bar.next = now + 40 + Math.random() * 260;
+      if (Math.random() < (amt / 100) * 0.6) {
+        const hgt = 0.5 + Math.random() * amt * 0.12;
+        const s = bar.el.style;
+        s.display = 'block';
+        s.top = `${(Math.random() * (100 - hgt)).toFixed(2)}%`;
+        s.height = `${hgt.toFixed(2)}%`;
+        s.backdropFilter = BAR_FILTERS[Math.floor(Math.random() * BAR_FILTERS.length)];
+      } else {
+        bar.el.style.display = 'none';
+      }
     }
   }
 }

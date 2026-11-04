@@ -1,6 +1,6 @@
 import { h } from './dom.js';
-import { parseVideoId, fetchTitle, searchVideos } from './youtube.js';
-import { DeckEffects } from './effects.js';
+import { parseVideoId, parsePlaylistId, fetchPlaylistIds, fetchTitle, searchVideos } from './youtube.js';
+import { DeckGlitch } from './effects.js';
 
 // YT.PlayerState values
 const PS = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
@@ -13,13 +13,16 @@ export const BLEND_MODES = [
   'hue', 'saturation', 'color', 'luminosity',
 ];
 
+const TINT_MODES = ['color', 'hue', 'difference', 'exclusion', 'multiply', 'screen', 'overlay', 'soft-light'];
+
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
 export const FX_DEFAULTS = {
   opacity: 1, blend: 'normal',
   hue: 0, sat: 100, contrast: 100, bright: 100, invert: 0, blur: 0,
   scale: 1, rotate: 0, flipX: false, flipY: false,
-  warp: 0, warpSpeed: 30, rgb: 0, rgbJitter: false, posterize: 0, edges: 0,
+  tint: 0, tintColor: '#ff00aa', tintMode: 'color',
+  hueSpeed: 0, shake: 0, tear: 0, blinds: 0, strobe: 0,
 };
 
 const FX_GROUPS = [
@@ -34,6 +37,7 @@ const FX_GROUPS = [
       { key: 'blur', label: 'Blur', min: 0, max: 20, step: 0.5, unit: 'px' },
     ],
   },
+  { title: 'Tint', tint: true, sliders: [{ key: 'tint', label: 'Amount', min: 0, max: 100, step: 1, unit: '%' }] },
   {
     title: 'Transform',
     sliders: [
@@ -45,13 +49,12 @@ const FX_GROUPS = [
   {
     title: 'Glitch',
     sliders: [
-      { key: 'warp', label: 'Warp', min: 0, max: 100, step: 1 },
-      { key: 'warpSpeed', label: 'Warp spd', min: 0, max: 100, step: 1 },
-      { key: 'rgb', label: 'RGB split', min: 0, max: 60, step: 1, unit: 'px' },
-      { key: 'posterize', label: 'Posterize', min: 0, max: 10, step: 1 },
-      { key: 'edges', label: 'Edges', min: 0, max: 100, step: 1, unit: '%' },
+      { key: 'hueSpeed', label: 'Hue cycle', min: 0, max: 100, step: 1 },
+      { key: 'shake', label: 'Shake', min: 0, max: 100, step: 1 },
+      { key: 'tear', label: 'Tear', min: 0, max: 100, step: 1 },
+      { key: 'blinds', label: 'Blinds', min: 0, max: 100, step: 1 },
+      { key: 'strobe', label: 'Strobe', min: 0, max: 100, step: 1 },
     ],
-    toggles: [{ key: 'rgbJitter', label: 'RGB jitter' }],
   },
 ];
 
@@ -84,6 +87,8 @@ export function hydrateDeckState(saved, index) {
     }
   }
   if (!BLEND_MODES.includes(fx.blend)) fx.blend = d.fx.blend;
+  if (!TINT_MODES.includes(fx.tintMode)) fx.tintMode = d.fx.tintMode;
+  if (!/^#[0-9a-f]{6}$/i.test(fx.tintColor)) fx.tintColor = d.fx.tintColor;
   const num = (v, def) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
   return {
     on: saved.on !== false,
@@ -97,13 +102,22 @@ export function hydrateDeckState(saved, index) {
   };
 }
 
+/** Sets a style property only when it changed (render runs every frame). */
+function setStyle(el, prop, value) {
+  const cache = (el._styleCache ||= {});
+  if (cache[prop] === value) return;
+  cache[prop] = value;
+  el.style[prop] = value;
+}
+
 export class Deck {
-  constructor({ index, state, stage, defs, mount, onChange, getApiKey }) {
+  constructor({ index, state, stage, mount, onChange, getApiKey }) {
     this.index = index;
     this.state = state;
     this.onChange = onChange;
     this.getApiKey = getApiKey;
 
+    this.YT = null;
     this.player = null;
     this.ready = false;
     this.playerState = PS.UNSTARTED;
@@ -111,14 +125,17 @@ export class Deck {
     this.suppressUntil = 0;     // ignore end-of-clip checks while a new clip spins up
     this.lastPoll = 0;
     this.errorStreak = 0;
+    this.glitch = new DeckGlitch();
 
-    this.layer = h('div', { class: 'layer' }, h('div', { id: `player-${index}` }));
+    this.tintEl = h('div', { class: 'tint' });
+    this.layer = h('div', { class: 'layer' }, h('div', { id: `player-${index}` }), this.tintEl);
     stage.appendChild(this.layer);
-    this.effects = new DeckEffects(index, defs);
 
     this.buildUI(mount);
-    this.applyFx();
+    this.render(performance.now());
     this.renderAll();
+    // Shared links (and older saves) can arrive without titles.
+    this.fillTitles(this.state.playlist.filter((it) => !it.title));
   }
 
   get current() { return this.state.playlist[this.state.index] || null; }
@@ -131,6 +148,7 @@ export class Deck {
   // ---------------------------------------------------------------- player
 
   attachPlayer(YT) {
+    this.YT = YT;
     this.player = new YT.Player(`player-${this.index}`, {
       width: '100%',
       height: '100%',
@@ -199,9 +217,9 @@ export class Deck {
     }
   }
 
-  /** Per-frame: animate effects; catch the end of a clip slightly early so YouTube's end screen never shows. */
+  /** Per-frame: draw effects; catch the end of a clip slightly early so YouTube's end screen never shows. */
   tick(now) {
-    this.effects.tick(now, this.state.fx);
+    this.render(now);
     if (!this.ready || this.playerState !== PS.PLAYING || now < this.suppressUntil) return;
     if (now - this.lastPoll < 100) return;
     this.lastPoll = now;
@@ -221,7 +239,6 @@ export class Deck {
       if (autoplay) this.player.loadVideoById(item.id);
       else this.player.cueVideoById(item.id);
       this.hasVideo = true;
-      this.applyFx();
     }
     this.renderPlaylist();
     this.renderNowPlaying();
@@ -254,7 +271,6 @@ export class Deck {
   stopPlayback() {
     if (this.ready && this.hasVideo) this.player.stopVideo();
     this.hasVideo = false;
-    this.applyFx();
     this.renderNowPlaying();
   }
 
@@ -266,7 +282,6 @@ export class Deck {
 
   toggleOn() {
     this.state.on = !this.state.on;
-    this.applyFx();
     this.renderHeader();
     this.onChange();
   }
@@ -303,41 +318,80 @@ export class Deck {
     }
     this.renderAll();
     this.onChange();
+    this.fillTitles(added.filter((it) => !it.title));
+  }
 
-    for (const item of added.filter((it) => !it.title)) {
-      fetchTitle(item.id).then((title) => {
-        if (!title) return;
+  /** Looks up missing titles a few at a time (a playlist import can add 200 at once). */
+  async fillTitles(items) {
+    const queue = [...items];
+    const worker = async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        const title = await fetchTitle(item.id);
+        if (!title) continue;
         item.title = title;
         this.renderPlaylist();
         this.renderNowPlaying();
         this.onChange();
-      });
-    }
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker));
   }
 
-  addFromText(text) {
-    const tokens = text.split(/[\s,]+/).filter(Boolean);
+  /** Adds anything pasted or dropped: video links/IDs and playlist links, mixed freely. */
+  async addFromText(text) {
+    const tokens = text.split(/[\s,]+/).filter((t) => t && !t.startsWith('#'));
     if (!tokens.length) return;
     const items = [];
+    const lists = [];
     let bad = 0;
     for (const t of tokens) {
+      const listId = parsePlaylistId(t);
+      if (listId) { lists.push(listId); continue; }
       const id = parseVideoId(t);
       if (id) items.push({ id });
       else bad++;
     }
+
+    let imported = 0;
+    for (const listId of lists) {
+      if (!this.YT) {
+        this.setStatus('Player still loading — try again in a moment.', true);
+        return;
+      }
+      this.setStatus('Importing playlist…');
+      try {
+        const ids = await fetchPlaylistIds(this.YT, listId);
+        items.push(...ids.map((id) => ({ id })));
+        imported++;
+      } catch (err) {
+        this.setStatus(err.message, true);
+        bad++;
+      }
+    }
+
     if (items.length) this.addItems(items);
-    this.setStatus(
-      `${items.length ? `Added ${items.length}` : 'Nothing added'}${bad ? ` · couldn't read ${bad} entr${bad === 1 ? 'y' : 'ies'}` : ''}`,
-      !items.length,
-    );
+    const parts = [items.length ? `Added ${items.length} video${items.length === 1 ? '' : 's'}` : 'Nothing added'];
+    if (imported) parts.push(`from ${imported} playlist${imported === 1 ? '' : 's'}`);
+    if (bad) parts.push(`· couldn't read ${bad} entr${bad === 1 ? 'y' : 'ies'}`);
+    this.setStatus(parts.join(' '), !items.length);
   }
 
-  async generate(query, append) {
+  /**
+   * Without an API key: opens YouTube search in a popup to drag videos from.
+   * With a key: loads (or appends) the top 10 embeddable results directly.
+   */
+  async search(query, append) {
     query = query.trim();
     if (!query) return;
     const key = this.getApiKey();
     if (!key) {
-      this.setStatus('Add a YouTube Data API key in the top bar to search.', true);
+      window.open(
+        `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
+        'rudderless-youtube',
+        'popup,width=960,height=900',
+      );
+      this.setStatus('YouTube opened — drag videos onto this deck, or paste a playlist link.');
       return;
     }
     this.setStatus(`Searching “${query}”…`);
@@ -390,38 +444,52 @@ export class Deck {
 
   // ------------------------------------------------------------------- fx
 
-  applyFx() {
+  /** Writes the layer's styles for this frame (static settings + animated glitch state). */
+  render(now) {
     const fx = this.state.fx;
+    const g = this.glitch.frame(now, fx);
+    const visible = this.state.on && this.hasVideo;   // idle players never show YouTube's placeholder UI
+    const layer = this.layer;
+
     const parts = [];
-    const svgUrl = this.effects.sync(fx);
-    if (svgUrl) parts.push(svgUrl);
-    if (fx.hue) parts.push(`hue-rotate(${fx.hue}deg)`);
+    if (g.hue) parts.push(`hue-rotate(${g.hue.toFixed(1)}deg)`);
     if (fx.sat !== 100) parts.push(`saturate(${fx.sat}%)`);
     if (fx.contrast !== 100) parts.push(`contrast(${fx.contrast}%)`);
     if (fx.bright !== 100) parts.push(`brightness(${fx.bright}%)`);
     if (fx.invert) parts.push(`invert(${fx.invert}%)`);
     if (fx.blur) parts.push(`blur(${fx.blur}px)`);
+    setStyle(layer, 'filter', parts.length ? parts.join(' ') : 'none');
 
-    const s = this.layer.style;
-    s.filter = parts.length ? parts.join(' ') : 'none';
-    // Hidden until a clip is loaded, so idle players never show YouTube's placeholder UI.
-    const visible = this.state.on && this.hasVideo;
-    s.opacity = visible ? String(fx.opacity) : '0';
-    s.visibility = visible ? 'visible' : 'hidden';
-    s.mixBlendMode = fx.blend;
-    s.transform = `scale(${fx.scale * (fx.flipX ? -1 : 1)}, ${fx.scale * (fx.flipY ? -1 : 1)}) rotate(${fx.rotate}deg)`;
+    setStyle(layer, 'visibility', visible ? 'visible' : 'hidden');
+    setStyle(layer, 'opacity', visible && !g.strobeOff ? String(fx.opacity) : '0');
+    setStyle(layer, 'mixBlendMode', fx.blend);
+
+    const sx = fx.scale * (fx.flipX ? -1 : 1);
+    const sy = fx.scale * (fx.flipY ? -1 : 1);
+    setStyle(layer, 'transform',
+      `translate(${g.tx.toFixed(1)}px, ${g.ty.toFixed(1)}px) skewX(${g.skew.toFixed(1)}deg) rotate(${fx.rotate}deg) scale(${sx}, ${sy})`);
+
+    setStyle(layer, 'clipPath', g.clip);
+    setStyle(layer, 'maskImage', g.mask);
+    setStyle(layer, 'webkitMaskImage', g.mask);
+    setStyle(layer, 'maskPosition', g.maskPos);
+    setStyle(layer, 'webkitMaskPosition', g.maskPos);
+
+    const tint = this.tintEl;
+    setStyle(tint, 'display', fx.tint > 0 ? 'block' : 'none');
+    setStyle(tint, 'background', fx.tintColor);
+    setStyle(tint, 'mixBlendMode', fx.tintMode);
+    setStyle(tint, 'opacity', String(fx.tint / 100));
   }
 
   setFx(key, value) {
     this.state.fx[key] = value;
-    this.applyFx();
     this.onChange();
   }
 
   resetFx() {
     const { opacity, blend } = this.state.fx;
     Object.assign(this.state.fx, FX_DEFAULTS, { opacity, blend });
-    this.applyFx();
     this.syncFxInputs();
     this.onChange();
   }
@@ -461,21 +529,21 @@ export class Deck {
     ui.status = h('div', { class: 'status' });
     ui.list = h('ol', { class: 'playlist' });
 
-    const addInput = h('input', { type: 'text', placeholder: 'YouTube URLs or IDs (paste several)', spellcheck: 'false' });
+    const addInput = h('input', { type: 'text', placeholder: 'Video or playlist links (paste several)', spellcheck: 'false' });
     const addForm = h('form', {
       class: 'row',
       onsubmit: (e) => { e.preventDefault(); this.addFromText(addInput.value); addInput.value = ''; },
     }, addInput, h('button', { type: 'submit' }, 'Add'));
 
-    const searchInput = h('input', { type: 'text', placeholder: 'Search term → 10 videos', spellcheck: 'false' });
-    const appendBox = h('input', { type: 'checkbox', title: 'Append instead of replacing the playlist' });
+    const searchInput = h('input', { type: 'text', placeholder: 'Search YouTube…', spellcheck: 'false' });
+    const appendBox = h('input', { type: 'checkbox' });
     const searchForm = h('form', {
       class: 'row',
-      onsubmit: (e) => { e.preventDefault(); this.generate(searchInput.value, appendBox.checked); },
+      onsubmit: (e) => { e.preventDefault(); this.search(searchInput.value, appendBox.checked); },
     },
     searchInput,
-    h('button', { type: 'submit' }, 'Generate'),
-    h('label', { class: 'checks', title: 'Append instead of replacing' }, appendBox, '+'));
+    h('button', { type: 'submit' }, 'Search'),
+    h('label', { class: 'checks', title: 'With an API key: append results instead of replacing the playlist' }, appendBox, '+'));
 
     const clearBtn = h('button', {
       type: 'button',
@@ -493,7 +561,29 @@ export class Deck {
       ui.status,
       this.buildFxUI(),
     );
+    this.enableDrop();
     mount.appendChild(this.card);
+  }
+
+  /** Accept video/playlist links dragged in from a YouTube tab or window. */
+  enableDrop() {
+    const card = this.card;
+    const hasText = (e) => [...(e.dataTransfer?.types || [])].some((t) => t === 'text/uri-list' || t === 'text/plain');
+    card.addEventListener('dragover', (e) => {
+      if (!hasText(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      card.classList.add('drop');
+    });
+    card.addEventListener('dragleave', (e) => {
+      if (!card.contains(e.relatedTarget)) card.classList.remove('drop');
+    });
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      card.classList.remove('drop');
+      const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+      if (text) this.addFromText(text);
+    });
   }
 
   buildFxUI() {
@@ -506,21 +596,33 @@ export class Deck {
     }, BLEND_MODES.map((m) => h('option', { value: m }, m === 'plus-lighter' ? 'add' : m)));
     this.fxInputs.blend = { input: blend };
 
+    const slider = (sl) => {
+      const out = h('output', {});
+      const fmt = (v) => `${Number.isInteger(v) ? v : v.toFixed(2)}${sl.unit || ''}`;
+      const input = h('input', {
+        type: 'range', min: sl.min, max: sl.max, step: sl.step, value: fx[sl.key],
+        title: 'Double-click to reset',
+        oninput: (e) => { const v = parseFloat(e.target.value); out.textContent = fmt(v); this.setFx(sl.key, v); },
+        ondblclick: (e) => { const v = FX_DEFAULTS[sl.key]; e.target.value = v; out.textContent = fmt(v); this.setFx(sl.key, v); },
+      });
+      out.textContent = fmt(fx[sl.key]);
+      this.fxInputs[sl.key] = { input, out, fmt };
+      return h('label', { class: 'slider' }, h('span', {}, sl.label), input, out);
+    };
+
+    const tintControls = () => {
+      const color = h('input', { type: 'color', value: fx.tintColor, oninput: (e) => this.setFx('tintColor', e.target.value) });
+      const mode = h('select', { value: fx.tintMode, onchange: (e) => this.setFx('tintMode', e.target.value) },
+        TINT_MODES.map((m) => h('option', { value: m }, m)));
+      this.fxInputs.tintColor = { input: color };
+      this.fxInputs.tintMode = { input: mode };
+      return h('div', { class: 'row' }, color, mode);
+    };
+
     const groups = FX_GROUPS.map((g) => h('div', { class: 'fx-group' },
       h('h4', {}, g.title),
-      g.sliders.map((sl) => {
-        const out = h('output', {});
-        const fmt = (v) => `${Number.isInteger(v) ? v : v.toFixed(2)}${sl.unit || ''}`;
-        const input = h('input', {
-          type: 'range', min: sl.min, max: sl.max, step: sl.step, value: fx[sl.key],
-          title: 'Double-click to reset',
-          oninput: (e) => { const v = parseFloat(e.target.value); out.textContent = fmt(v); this.setFx(sl.key, v); },
-          ondblclick: (e) => { const v = FX_DEFAULTS[sl.key]; e.target.value = v; out.textContent = fmt(v); this.setFx(sl.key, v); },
-        });
-        out.textContent = fmt(fx[sl.key]);
-        this.fxInputs[sl.key] = { input, out, fmt };
-        return h('label', { class: 'slider' }, h('span', {}, sl.label), input, out);
-      }),
+      g.tint && tintControls(),
+      g.sliders.map(slider),
       g.toggles && h('div', { class: 'checks' }, g.toggles.map((t) => {
         const input = h('input', { type: 'checkbox', checked: fx[t.key], onchange: (e) => this.setFx(t.key, e.target.checked) });
         this.fxInputs[t.key] = { input };

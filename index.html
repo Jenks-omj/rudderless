@@ -7,26 +7,28 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- Output: one absolutely-positioned layer per deck, stacked in deck order -->
+  <!-- Output preview: one layer per deck, stacked in deck order (deck 1 at the bottom).
+       Fullscreen (F) blows this box up to fill the screen. -->
   <div id="stage"></div>
-
-  <!-- SVG filter definitions (one filter per deck, built by js/effects.js).
-       Must not be display:none or the filters stop working. -->
-  <svg id="fx-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs></defs></svg>
 
   <div id="panel">
     <header class="topbar">
       <span class="brand">rudderless</span>
-      <button id="btnFullscreen" type="button" title="Fullscreen (F)">Fullscreen</button>
-      <button id="btnHide" type="button" title="Hide controls (H)">Hide panel</button>
+      <button id="btnFullscreen" type="button" title="Fullscreen output (F)">Fullscreen</button>
       <button id="btnBlackout" type="button" title="Blackout (B)">Blackout</button>
+      <button id="btnShare" type="button" title="Copy a link that opens with these playlists and effects loaded">Share</button>
+      <label class="master" title="Glitch bars over all decks">
+        <span>Bars</span><input id="masterBars" type="range" min="0" max="100" step="1" value="0">
+      </label>
+      <label class="master" title="Scanlines over all decks">
+        <span>Scanlines</span><input id="masterScan" type="range" min="0" max="100" step="1" value="0">
+      </label>
       <span class="spacer"></span>
-      <form class="apikey" onsubmit="return false">
-        <label for="apiKey">YouTube API key</label>
-        <input id="apiKey" type="password" placeholder="needed for search" autocomplete="off" spellcheck="false">
+      <form class="apikey" onsubmit="return false" title="Optional: lets Search load 10 results straight into a deck">
+        <label for="apiKey">API key</label>
+        <input id="apiKey" type="password" placeholder="optional" autocomplete="off" spellcheck="false">
       </form>
-      <a class="hint" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">get one</a>
-      <span class="keys">1–4 deck on/off · H panel · F fullscreen · B blackout</span>
+      <span class="keys">1–4 deck on/off · F fullscreen · B blackout</span>
     </header>
     <div id="decks"></div>
   </div>
